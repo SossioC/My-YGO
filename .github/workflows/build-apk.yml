@@ -1,0 +1,51 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scarica il codice
+        uses: actions/checkout@v4
+
+      - name: Installa Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Installa Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Genera il progetto Android (se manca)
+        run: |
+          if [ ! -d android ]; then
+            flutter create --platforms=android --org com.myygo --project-name my_ygo _tmp_project
+            cp -r _tmp_project/android ./android
+            rm -rf _tmp_project
+          fi
+          sed -i 's/android:label="[^"]*"/android:label="My YGO"/' android/app/src/main/AndroidManifest.xml
+
+      - name: Usa la chiave di firma fissa
+        run: |
+          mkdir -p ~/.android
+          cp ci/debug.keystore ~/.android/debug.keystore
+
+      - name: Scarica le dipendenze
+        run: flutter pub get
+
+      - name: Compila l'APK
+        run: flutter build apk --release
+
+      - name: Salva l'APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-ygo-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
