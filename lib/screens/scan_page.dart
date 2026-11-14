@@ -234,7 +234,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       metadata: InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
-        format: format,
+        format: InputImageFormat.nv21,
         bytesPerRow: plane.bytesPerRow,
       ),
     );
