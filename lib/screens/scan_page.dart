@@ -6,48 +6,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
+import '../data/card_repository.dart';
 import '../models/card_info.dart';
+import '../models/owned_card.dart';
+import '../services/card_images.dart';
 import '../services/code_parser.dart';
 import '../services/debug_log.dart';
 import '../services/sounds.dart';
 import '../services/ygo_api.dart';
 import '../theme.dart';
+import '../widgets/card_thumb.dart';
+import 'card_edit_page.dart';
 
 enum _Frame { idle, ok, error }
 
 enum _Banner { hint, searching, success, error, duplicate }
 
-class ScanEntry {
-  final CardInfo card;
-  String code;
-  int qtyIt = 0;
-  int qtyEn = 0;
-  String lastLang = 'en';
-
-  ScanEntry(this.card, this.code);
-
-  int qty(String lang) => lang == 'it' ? qtyIt : qtyEn;
-
-  void add(String lang) {
-    if (lang == 'it') {
-      qtyIt++;
-    } else {
-      qtyEn++;
-    }
-    lastLang = lang;
-  }
-
-  void undo() {
-    if (lastLang == 'it' && qtyIt > 0) {
-      qtyIt--;
-    } else if (qtyEn > 0) {
-      qtyEn--;
-    } else if (qtyIt > 0) {
-      qtyIt--;
-    }
-  }
-
-  bool get isEmpty => qtyIt == 0 && qtyEn == 0;
+/// Una carta scansionata durante questa sessione.
+class _SessionItem {
+  OwnedCard card;
+  final List<String> added = [];
+  _SessionItem(this.card);
 }
 
 class ScanPage extends StatefulWidget {
@@ -60,39 +39,53 @@ class ScanPage extends StatefulWidget {
 }
 
 class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
+  static const String _defaultHint =
+      'Inquadra la carta. Il codice va in basso a sinistra, nel riquadro piccolo.';
+  static const String _struggleHint =
+      'Non riesco a leggere il codice: avvicina un poco la carta, tienila ferma ed evita i riflessi. Puoi anche toccare lo schermo per mettere a fuoco.';
+
   final TextRecognizer _recognizer =
       TextRecognizer(script: TextRecognitionScript.latin);
   final YgoApi _api = YgoApi();
   final Sounds _sounds = Sounds();
-  final List<ScanEntry> _entries = [];
+  final CardRepository _repo = CardRepository.instance;
+  final List<_SessionItem> _session = [];
 
   CameraController? _controller;
   CameraDescription? _camera;
   bool _starting = false;
   String? _cameraError;
 
+  ResolutionPreset _preset = ResolutionPreset.ultraHigh;
+  double _zoom = 1.0;
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+
   bool _processing = false;
   int _lastFrameMs = 0;
   bool _formatLogged = false;
 
+  final Map<String, List<int>> _hits = {};
   String? _lockedCode;
-  String? _candidate;
-  int _candidateHits = 0;
+  int _lockedSeenMs = 0;
   int _lastCodeSeenMs = 0;
   int? _noTextSince;
   int? _unreadableSince;
-  int _lastErrorMs = 0;
+  bool _unreadableErrored = false;
   String _lastOcr = '';
 
   _Frame _frame = _Frame.idle;
   Timer? _frameTimer;
 
   _Banner _banner = _Banner.hint;
+  String _hintMsg = _defaultHint;
   String _bannerTitle = '';
   String _bannerMsg = '';
   CardInfo? _bannerCard;
   String? _bannerLang;
   String? _bannerCode;
+  String _bannerTotals = '';
+  String? _lastFailedCode;
 
   CardInfo? _pendingCard;
   String? _pendingLang;
@@ -162,13 +155,19 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       );
       final ctrl = CameraController(
         cam,
-        ResolutionPreset.veryHigh,
+        _preset,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.nv21,
       );
       await ctrl.initialize();
       try {
         await ctrl.setFocusMode(FocusMode.auto);
+      } catch (_) {}
+      try {
+        _minZoom = await ctrl.getMinZoomLevel();
+        _maxZoom = math.min(await ctrl.getMaxZoomLevel(), 4.0);
+        _zoom = _zoom.clamp(_minZoom, _maxZoom).toDouble();
+        await ctrl.setZoomLevel(_zoom);
       } catch (_) {}
       if (!mounted || !widget.active) {
         await ctrl.dispose();
@@ -177,7 +176,8 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       _camera = cam;
       _controller = ctrl;
       await ctrl.startImageStream(_onFrame);
-      DebugLog.add('Fotocamera avviata (${cam.sensorOrientation} gradi)');
+      DebugLog.add(
+          'Fotocamera avviata: ${ctrl.value.previewSize}, qualità $_preset, zoom $_zoom');
     } on CameraException catch (e) {
       DebugLog.add('Fotocamera: ${e.code} ${e.description}');
       _cameraError =
@@ -206,6 +206,31 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         await c.dispose();
       } catch (_) {}
     }
+  }
+
+  Future<void> _restartCamera() async {
+    await _stopCamera();
+    await _startCamera();
+  }
+
+  Future<void> _setZoom(double z) async {
+    _zoom = z;
+    try {
+      await _controller?.setZoomLevel(z);
+    } catch (_) {}
+  }
+
+  Future<void> _focusAt(TapDownDetails d, Size area) async {
+    final c = _controller;
+    if (c == null) return;
+    final p = Offset(
+      (d.localPosition.dx / area.width).clamp(0.0, 1.0).toDouble(),
+      (d.localPosition.dy / area.height).clamp(0.0, 1.0).toDouble(),
+    );
+    try {
+      await c.setFocusPoint(p);
+      await c.setExposurePoint(p);
+    } catch (_) {}
   }
 
   InputImage? _toInputImage(CameraImage image) {
@@ -244,7 +269,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   Future<void> _onFrame(CameraImage image) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (_processing || now - _lastFrameMs < 350) return;
+    if (_processing || now - _lastFrameMs < 250) return;
     _processing = true;
     _lastFrameMs = now;
     try {
@@ -260,6 +285,12 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     }
   }
 
+  void _setHint(String msg) {
+    if (_hintMsg == msg) return;
+    if (!mounted) return;
+    setState(() => _hintMsg = msg);
+  }
+
   Future<void> _handleText(String raw) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     _lastOcr = raw.replaceAll('\n', ' | ');
@@ -273,49 +304,76 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         _noTextSince = null;
       }
 
+      // La carta è uscita dall'inquadratura: sblocca.
       if (_lockedCode != null) {
         final gone = _noTextSince != null && now - _noTextSince! > 1000;
         final stale = now - _lastCodeSeenMs > 4000;
         if (gone || stale) {
           _lockedCode = null;
-          _candidate = null;
-          _candidateHits = 0;
+          _hits.clear();
         }
         return;
       }
 
-      if (hasText) {
-        _unreadableSince ??= now;
-        if (now - _unreadableSince! > 2500 && now - _lastErrorMs > 4000) {
-          _lastErrorMs = now;
-          _fail('Codice non letto', 'Avvicina la carta o aggiungila a mano.',
-              manual: true);
-        }
-      } else {
+      if (!hasText) {
         _unreadableSince = null;
+        _unreadableErrored = false;
+        _setHint(_defaultHint);
+        return;
+      }
+
+      _unreadableSince ??= now;
+      final elapsed = now - _unreadableSince!;
+      if (elapsed > 1800 && _banner == _Banner.hint) {
+        _setHint(_struggleHint);
+      }
+      if (elapsed > 5000 && !_unreadableErrored) {
+        _unreadableErrored = true;
+        DebugLog.add('NON LETTO. Testo visto: $_lastOcr');
+        _fail('Codice non letto', 'Avvicina la carta o aggiungila a mano.');
       }
       return;
     }
 
+    // Almeno un codice trovato.
     _unreadableSince = null;
+    _unreadableErrored = false;
     _noTextSince = null;
-    final code = codes.first;
     _lastCodeSeenMs = now;
+    _setHint(_defaultHint);
 
-    if (code.raw == _lockedCode) return;
-
-    if (_candidate == code.raw) {
-      _candidateHits++;
-    } else {
-      _candidate = code.raw;
-      _candidateHits = 1;
+    for (final c in codes) {
+      _hits.putIfAbsent(c.raw, () => []).add(now);
     }
-    if (_candidateHits < 2) return;
+    for (final list in _hits.values) {
+      list.removeWhere((t) => now - t > 2500);
+    }
+    _hits.removeWhere((k, v) => v.isEmpty);
 
-    _candidate = null;
-    _candidateHits = 0;
-    _lockedCode = code.raw;
-    await _resolve(code);
+    if (_lockedCode != null && codes.any((c) => c.raw == _lockedCode)) {
+      _lockedSeenMs = now;
+      return;
+    }
+    // La carta di prima è ancora lì: un codice diverso è quasi sempre una lettura sbagliata.
+    if (_lockedCode != null && now - _lockedSeenMs < 1000) return;
+
+    // Il codice vale se letto almeno 2 volte negli ultimi istanti.
+    String? best;
+    int bestHits = 0;
+    _hits.forEach((k, v) {
+      if (v.length > bestHits) {
+        best = k;
+        bestHits = v.length;
+      }
+    });
+    if (best == null || bestHits < 2) return;
+
+    final chosen = codes.firstWhere((c) => c.raw == best,
+        orElse: () => codes.first);
+    _hits.clear();
+    _lockedCode = chosen.raw;
+    _lockedSeenMs = now;
+    await _resolve(chosen);
   }
 
   Future<void> _resolve(ParsedCode code) async {
@@ -337,21 +395,23 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       _fail('Errore di rete', 'Controlla la connessione e riprova.');
       return;
     }
-    final card = res.card;
-    if (card == null) {
+    final info = res.card;
+    if (info == null) {
+      _lastFailedCode = code.raw;
       _fail('Carta non trovata', 'Codice letto: ${code.raw}', manual: true);
       return;
     }
 
-    final existing = _entries.where((e) => e.card.id == card.id).toList();
-    if (existing.isNotEmpty && existing.first.qty(lang) > 0) {
+    final already = _session.any(
+        (s) => s.card.ygoId == info.id && s.added.contains(lang));
+    if (already) {
       _sounds.playOk();
       setState(() {
-        _pendingCard = card;
+        _pendingCard = info;
         _pendingLang = lang;
         _pendingCode = code.raw;
         _banner = _Banner.duplicate;
-        _bannerCard = card;
+        _bannerCard = info;
         _bannerLang = lang;
         _bannerCode = code.raw;
       });
@@ -359,29 +419,54 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       return;
     }
 
-    _addCopy(card, lang, code.raw);
+    await _addCopy(info, lang, code.raw);
   }
 
-  void _addCopy(CardInfo card, String lang, String code) {
-    final idx = _entries.indexWhere((e) => e.card.id == card.id);
-    ScanEntry entry;
-    if (idx >= 0) {
-      entry = _entries.removeAt(idx);
-    } else {
-      entry = ScanEntry(card, code);
+  Future<void> _addCopy(CardInfo info, String lang, String code) async {
+    OwnedCard owned;
+    try {
+      owned = await _repo.addCopy(info, lang, code);
+    } catch (e) {
+      DebugLog.add('Errore database: $e');
+      _fail('Errore di salvataggio', '$e');
+      return;
     }
-    entry.add(lang);
-    entry.code = code;
+    if (!mounted) return;
+
+    final idx = _session.indexWhere((s) => s.card.ygoId == info.id);
+    _SessionItem item;
+    if (idx >= 0) {
+      item = _session.removeAt(idx);
+      item.card = owned;
+    } else {
+      item = _SessionItem(owned);
+    }
+    item.added.add(lang);
+
     _sounds.playOk();
     setState(() {
-      _entries.insert(0, entry);
+      _session.insert(0, item);
       _pendingCard = null;
       _banner = _Banner.success;
-      _bannerCard = card;
+      _bannerCard = info;
       _bannerLang = lang;
       _bannerCode = code;
+      _bannerTotals = 'In collezione: IT ×${owned.qtyIt}  EN ×${owned.qtyEn}';
     });
     _flash(_Frame.ok);
+    _cacheImage(owned);
+  }
+
+  Future<void> _cacheImage(OwnedCard owned) async {
+    final id = owned.id;
+    final ygoId = owned.ygoId;
+    if (id == null || ygoId == null) return;
+    if (owned.imagePath != null) return;
+    final path = await CardImages.download(ygoId, owned.imageUrl);
+    if (path != null) {
+      await _repo.setImagePath(id, path);
+      owned.imagePath = path;
+    }
   }
 
   void _answerDuplicate(bool yes) {
@@ -420,44 +505,103 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     });
   }
 
-  void _undo(ScanEntry e) {
+  Future<void> _undo(_SessionItem it) async {
+    if (it.added.isEmpty) return;
+    final lang = it.added.removeLast();
+    final id = it.card.id;
+    OwnedCard? updated;
+    if (id != null) updated = await _repo.removeCopy(id, lang);
+    if (!mounted) return;
     setState(() {
-      e.undo();
-      if (e.isEmpty) _entries.remove(e);
+      if (updated != null) it.card = updated;
+      if (it.added.isEmpty || updated == null) _session.remove(it);
     });
   }
 
-  void _showDebug() {
+  void _addManually() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CardEditPage(prefillCode: _lastFailedCode),
+      ),
+    );
+  }
+
+  void _showSettings() {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.surface,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.7,
-        builder: (ctx, scroll) => ListView(
-          controller: scroll,
-          padding: const EdgeInsets.all(16),
-          children: [
-            const Text('Diagnostica',
-                style: TextStyle(
-                    color: AppColors.gold,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            const Text('Ultimo testo letto dalla fotocamera:',
-                style: TextStyle(color: AppColors.textDim)),
-            const SizedBox(height: 4),
-            SelectableText(_lastOcr.isEmpty ? '(niente)' : _lastOcr,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
-            const SizedBox(height: 16),
-            const Text('Registro:', style: TextStyle(color: AppColors.textDim)),
-            const SizedBox(height: 4),
-            SelectableText(
-              DebugLog.lines.isEmpty ? '(vuoto)' : DebugLog.lines.join('\n'),
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-            ),
-          ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.75,
+          builder: (ctx, scroll) => ListView(
+            controller: scroll,
+            padding: const EdgeInsets.all(16),
+            children: [
+              const Text('Impostazioni scansione',
+                  style: TextStyle(
+                      color: AppColors.gold,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              const Text('Qualità di lettura',
+                  style: TextStyle(color: AppColors.textDim)),
+              const SizedBox(height: 6),
+              SegmentedButton<ResolutionPreset>(
+                segments: const [
+                  ButtonSegment(
+                      value: ResolutionPreset.veryHigh, label: Text('Alta 1080p')),
+                  ButtonSegment(
+                      value: ResolutionPreset.ultraHigh,
+                      label: Text('Massima 4K')),
+                ],
+                selected: {_preset},
+                onSelectionChanged: (s) {
+                  setSheet(() => _preset = s.first);
+                  setState(() {});
+                  _restartCamera();
+                },
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                  'Massima legge meglio i codici piccoli ma è più pesante. Se il telefono rallenta, scegli Alta.',
+                  style: TextStyle(color: AppColors.textDim, fontSize: 12)),
+              const SizedBox(height: 16),
+              Text('Zoom: ${_zoom.toStringAsFixed(1)}x',
+                  style: const TextStyle(color: AppColors.textDim)),
+              Slider(
+                value: _zoom.clamp(_minZoom, _maxZoom).toDouble(),
+                min: _minZoom,
+                max: _maxZoom > _minZoom ? _maxZoom : _minZoom + 0.1,
+                onChanged: (v) {
+                  setSheet(() => _zoom = v);
+                  _setZoom(v);
+                },
+              ),
+              const Divider(),
+              const Text('Diagnostica',
+                  style: TextStyle(
+                      color: AppColors.gold,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const Text('Ultimo testo letto dalla fotocamera:',
+                  style: TextStyle(color: AppColors.textDim)),
+              const SizedBox(height: 4),
+              SelectableText(_lastOcr.isEmpty ? '(niente)' : _lastOcr,
+                  style:
+                      const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+              const SizedBox(height: 12),
+              const Text('Registro:',
+                  style: TextStyle(color: AppColors.textDim)),
+              const SizedBox(height: 4),
+              SelectableText(
+                DebugLog.lines.isEmpty ? '(vuoto)' : DebugLog.lines.join('\n'),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -480,7 +624,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        Expanded(flex: 5, child: _cameraArea()),
+        Expanded(flex: 6, child: _cameraArea()),
         _buildBanner(),
         Expanded(flex: 3, child: _buildList()),
       ],
@@ -533,32 +677,41 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       color: Colors.black,
       child: LayoutBuilder(builder: (context, box) {
         final fw =
-            math.min(box.maxWidth * 0.62, box.maxHeight * 0.88 * 59 / 86);
+            math.min(box.maxWidth * 0.9, box.maxHeight * 0.94 * 59 / 86);
         final fh = fw * 86 / 59;
         final color = _frameColor;
+        final area = Size(box.maxWidth, box.maxHeight);
         return Stack(
           children: [
-            Positioned.fill(child: _previewWidget()),
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: (d) => _focusAt(d, area),
+                child: _previewWidget(),
+              ),
+            ),
             if (_controller != null)
-              Center(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  width: fw,
-                  height: fh,
-                  decoration: BoxDecoration(
-                    border: Border.all(color: color, width: 3),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Align(
-                    alignment: Alignment.bottomLeft,
-                    child: Padding(
-                      padding: const EdgeInsets.all(6),
-                      child: Container(
-                        width: fw * 0.4,
-                        height: 18,
-                        decoration: BoxDecoration(
-                          border: Border.all(color: color, width: 1),
-                          borderRadius: BorderRadius.circular(2),
+              IgnorePointer(
+                child: Center(
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: fw,
+                    height: fh,
+                    decoration: BoxDecoration(
+                      border: Border.all(color: color, width: 3),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Align(
+                      alignment: Alignment.bottomLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Container(
+                          width: fw * 0.4,
+                          height: 18,
+                          decoration: BoxDecoration(
+                            border: Border.all(color: color, width: 1),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
                         ),
                       ),
                     ),
@@ -569,10 +722,10 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
               top: 4,
               right: 4,
               child: IconButton(
-                icon: const Icon(Icons.bug_report_outlined),
+                icon: const Icon(Icons.tune),
                 color: Colors.white70,
-                tooltip: 'Diagnostica',
-                onPressed: _showDebug,
+                tooltip: 'Impostazioni e diagnostica',
+                onPressed: _showSettings,
               ),
             ),
           ],
@@ -582,21 +735,6 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   }
 
   String _langLabel(String? lang) => lang == 'it' ? 'IT' : 'EN';
-
-  Widget _thumb(CardInfo card) {
-    final url = card.imageUrl;
-    if (url == null) return const SizedBox(width: 44, height: 64);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(3),
-      child: Image.network(
-        url,
-        width: 44,
-        height: 64,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => const SizedBox(width: 44, height: 64),
-      ),
-    );
-  }
 
   Widget _buildBanner() {
     Widget child;
@@ -616,7 +754,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       final card = _bannerCard!;
       child = Row(
         children: [
-          _thumb(card),
+          CardThumb(url: card.imageSmallUrl ?? card.imageUrl),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -636,7 +774,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                 ),
                 Text(card.nameEn,
                     style: const TextStyle(color: AppColors.textDim)),
-                Text(_bannerCode ?? '',
+                Text('${_bannerCode ?? ''}  ·  $_bannerTotals',
                     style: const TextStyle(color: AppColors.gold, fontSize: 12)),
               ],
             ),
@@ -655,12 +793,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           Text(_bannerMsg, style: const TextStyle(color: AppColors.textDim)),
           const SizedBox(height: 6),
           OutlinedButton(
-            onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                    "L'aggiunta manuale arriva con il database, nel prossimo pacchetto."),
-              ),
-            ),
+            onPressed: _addManually,
             child: const Text('Aggiungi a mano'),
           ),
         ],
@@ -703,11 +836,11 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         ],
       );
     } else {
-      child = const Center(
+      child = Center(
         child: Text(
-          'Inquadra la carta. Il codice va in basso a sinistra, nel riquadro piccolo.',
+          _hintMsg,
           textAlign: TextAlign.center,
-          style: TextStyle(color: AppColors.textDim),
+          style: const TextStyle(color: AppColors.textDim),
         ),
       );
     }
@@ -722,33 +855,34 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   }
 
   Widget _buildList() {
-    if (_entries.isEmpty) {
+    if (_session.isEmpty) {
       return const Center(
         child: Text('Le carte scansionate compariranno qui.',
             style: TextStyle(color: AppColors.textDim)),
       );
     }
     return ListView.builder(
-      itemCount: _entries.length,
+      itemCount: _session.length,
       itemBuilder: (context, i) {
-        final e = _entries[i];
-        final nameIt = (e.card.nameIt == null || e.card.nameIt!.isEmpty)
-            ? '—'
-            : e.card.nameIt!;
+        final s = _session[i];
+        final c = s.card;
         return ListTile(
           dense: true,
-          title: Text(nameIt, maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text('${e.card.nameEn}  ·  ${e.code}',
+          leading: CardThumb(
+              path: c.imagePath, url: c.imageUrl, width: 30, height: 44),
+          title: Text(c.nameIt.isEmpty ? '—' : c.nameIt,
+              maxLines: 1, overflow: TextOverflow.ellipsis),
+          subtitle: Text('${c.nameEn}  ·  ${c.code}',
               maxLines: 1, overflow: TextOverflow.ellipsis),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('IT ×${e.qtyIt}  EN ×${e.qtyEn}',
+              Text('IT ×${c.qtyIt}  EN ×${c.qtyEn}',
                   style: const TextStyle(color: AppColors.gold)),
               IconButton(
                 icon: const Icon(Icons.undo),
-                tooltip: 'Annulla una copia',
-                onPressed: () => _undo(e),
+                tooltip: 'Annulla l\'ultima copia aggiunta',
+                onPressed: () => _undo(s),
               ),
             ],
           ),

@@ -108,9 +108,12 @@ class YgoApi {
     }
 
     String? image;
+    String? imageSmall;
     final images = enData['card_images'];
     if (images is List && images.isNotEmpty) {
-      image = (images.first as Map)['image_url_small'] as String?;
+      final first = images.first as Map;
+      image = first['image_url'] as String?;
+      imageSmall = first['image_url_small'] as String?;
     }
 
     final card = CardInfo(
@@ -126,6 +129,7 @@ class YgoApi {
       descEn: enData['desc'] as String?,
       descIt: descIt,
       imageUrl: image,
+      imageSmallUrl: imageSmall,
     );
     _cards[id] = card;
     return card;

@@ -1,7 +1,7 @@
 name: my_ygo
 description: Archivio e gestione delle carte Yu-Gi-Oh!
 publish_to: 'none'
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: '>=3.0.0'
@@ -13,6 +13,9 @@ dependencies:
   google_mlkit_text_recognition: '>=0.15.0 <2.0.0'
   audioplayers: '>=6.0.0 <7.0.0'
   http: '>=1.2.0 <2.0.0'
+  sqflite: '>=2.3.0 <3.0.0'
+  path_provider: '>=2.1.0 <3.0.0'
+  path: '>=1.8.0 <2.0.0'
 
 flutter:
   uses-material-design: true

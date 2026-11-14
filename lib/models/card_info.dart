@@ -1,3 +1,4 @@
+/// Dati di una carta ricevuti da internet (YGOPRODeck).
 class CardInfo {
   final int id;
   final String nameEn;
@@ -11,6 +12,7 @@ class CardInfo {
   final String? descEn;
   final String? descIt;
   final String? imageUrl;
+  final String? imageSmallUrl;
 
   const CardInfo({
     required this.id,
@@ -25,13 +27,6 @@ class CardInfo {
     this.descEn,
     this.descIt,
     this.imageUrl,
+    this.imageSmallUrl,
   });
-
-  bool get isExtraDeck {
-    final t = type.toLowerCase();
-    return t.contains('fusion') ||
-        t.contains('synchro') ||
-        t.contains('xyz') ||
-        t.contains('link');
-  }
 }

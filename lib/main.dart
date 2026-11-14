@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'screens/collection_page.dart';
 import 'screens/scan_page.dart';
 import 'theme.dart';
 
@@ -67,11 +68,7 @@ class _HomeShellState extends State<HomeShell> {
         index: _index,
         children: [
           ScanPage(active: _index == 0),
-          const PlaceholderPage(
-            icon: Icons.style_outlined,
-            title: 'Collezione',
-            subtitle: 'Qui vedrai tutte le tue carte.',
-          ),
+          const CollectionPage(),
           const PlaceholderPage(
             icon: Icons.layers_outlined,
             title: 'Deck',
