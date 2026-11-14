@@ -16,7 +16,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Installa Flutter
         uses: subosito/flutter-action@v2
@@ -33,7 +33,16 @@ jobs:
           fi
           sed -i 's/android:label="[^"]*"/android:label="My YGO"/' android/app/src/main/AndroidManifest.xml
 
-      - name: Configura permessi e versione minima Android
+      - name: Regole per R8 (ignora i riconoscitori di altre scritture di ML Kit)
+        run: |
+          cat > android/app/proguard-rules.pro <<'EOF2'
+          -dontwarn com.google.mlkit.vision.text.chinese.**
+          -dontwarn com.google.mlkit.vision.text.devanagari.**
+          -dontwarn com.google.mlkit.vision.text.japanese.**
+          -dontwarn com.google.mlkit.vision.text.korean.**
+          EOF2
+
+      - name: Configura permessi, versione minima e compilazione release
         run: |
           python3 - <<'PY'
           import re, pathlib
@@ -48,16 +57,28 @@ jobs:
               m.write_text(t)
           for name in ['build.gradle.kts', 'build.gradle']:
               g = pathlib.Path('android/app') / name
-              if g.exists():
-                  s = g.read_text()
-                  kts = name.endswith('kts')
-                  rep = 'minSdk = maxOf(24, flutter.minSdkVersion)' if kts else 'minSdkVersion Math.max(24, flutter.minSdkVersion)'
-                  s2 = re.sub(r'minSdk(Version)?(\s*=\s*|\s+)flutter\.minSdkVersion', rep, s)
-                  if s2 != s:
-                      g.write_text(s2)
-                  print(name, 'minSdk aggiornato' if s2 != s else 'minSdk invariato')
+              if not g.exists():
+                  continue
+              s = g.read_text()
+              kts = name.endswith('kts')
+              rep = 'minSdk = maxOf(24, flutter.minSdkVersion)' if kts else 'minSdkVersion Math.max(24, flutter.minSdkVersion)'
+              s = re.sub(r'minSdk(Version)?(\s*=\s*|\s+)flutter\.minSdkVersion', rep, s)
+              if 'proguard-rules.pro' not in s:
+                  if kts:
+                      marker = 'signingConfig = signingConfigs.getByName("debug")'
+                      add = marker + '\n            isMinifyEnabled = false\n            isShrinkResources = false\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")'
+                  else:
+                      marker = 'signingConfig signingConfigs.debug'
+                      add = marker + '\n            minifyEnabled false\n            shrinkResources false\n            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"'
+                  if marker in s:
+                      s = s.replace(marker, add, 1)
+                      print(name, 'release configurato')
+                  else:
+                      print(name, 'ATTENZIONE: punto release non trovato')
+              g.write_text(s)
           PY
           grep -n "permission" android/app/src/main/AndroidManifest.xml || true
+          grep -n -E "minSdk|minify|Minify|proguard|signingConfig" android/app/build.gradle* || true
 
       - name: Usa la chiave di firma fissa
         run: |
