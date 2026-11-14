@@ -33,6 +33,32 @@ jobs:
           fi
           sed -i 's/android:label="[^"]*"/android:label="My YGO"/' android/app/src/main/AndroidManifest.xml
 
+      - name: Configura permessi e versione minima Android
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          m = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          t = m.read_text()
+          perms = ''
+          for p in ['INTERNET', 'CAMERA']:
+              if 'android.permission.' + p not in t:
+                  perms += '\n    <uses-permission android:name="android.permission.' + p + '"/>'
+          if perms:
+              t = re.sub(r'(<manifest[^>]*>)', lambda x: x.group(1) + perms, t, count=1)
+              m.write_text(t)
+          for name in ['build.gradle.kts', 'build.gradle']:
+              g = pathlib.Path('android/app') / name
+              if g.exists():
+                  s = g.read_text()
+                  kts = name.endswith('kts')
+                  rep = 'minSdk = maxOf(24, flutter.minSdkVersion)' if kts else 'minSdkVersion Math.max(24, flutter.minSdkVersion)'
+                  s2 = re.sub(r'minSdk(Version)?(\s*=\s*|\s+)flutter\.minSdkVersion', rep, s)
+                  if s2 != s:
+                      g.write_text(s2)
+                  print(name, 'minSdk aggiornato' if s2 != s else 'minSdk invariato')
+          PY
+          grep -n "permission" android/app/src/main/AndroidManifest.xml || true
+
       - name: Usa la chiave di firma fissa
         run: |
           mkdir -p ~/.android

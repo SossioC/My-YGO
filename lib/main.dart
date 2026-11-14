@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
-void main() => runApp(const MyYgoApp());
+import 'screens/scan_page.dart';
+import 'theme.dart';
 
-class AppColors {
-  static const background = Color(0xFF0E0B14);
-  static const surface = Color(0xFF1A1524);
-  static const gold = Color(0xFFD4AF37);
-  static const purple = Color(0xFF7B4FB8);
-  static const textDim = Color(0xFF9A93A8);
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  runApp(const MyYgoApp());
 }
 
 class MyYgoApp extends StatelessWidget {
@@ -54,24 +54,6 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
-  static const _pages = <Widget>[
-    PlaceholderPage(
-      icon: Icons.document_scanner_outlined,
-      title: 'Scansione',
-      subtitle: 'Qui scansionerai le carte in continuo.',
-    ),
-    PlaceholderPage(
-      icon: Icons.style_outlined,
-      title: 'Collezione',
-      subtitle: 'Qui vedrai tutte le tue carte.',
-    ),
-    PlaceholderPage(
-      icon: Icons.layers_outlined,
-      title: 'Deck',
-      subtitle: 'Qui creerai i tuoi deck.',
-    ),
-  ];
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -81,7 +63,22 @@ class _HomeShellState extends State<HomeShell> {
           style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold),
         ),
       ),
-      body: IndexedStack(index: _index, children: _pages),
+      body: IndexedStack(
+        index: _index,
+        children: [
+          ScanPage(active: _index == 0),
+          const PlaceholderPage(
+            icon: Icons.style_outlined,
+            title: 'Collezione',
+            subtitle: 'Qui vedrai tutte le tue carte.',
+          ),
+          const PlaceholderPage(
+            icon: Icons.layers_outlined,
+            title: 'Deck',
+            subtitle: 'Qui creerai i tuoi deck.',
+          ),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
