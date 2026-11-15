@@ -1,9 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'data/card_repository.dart';
 import 'screens/collection_page.dart';
+import 'screens/decks_page.dart';
 import 'screens/scan_page.dart';
+import 'services/backup_service.dart';
 import 'theme.dart';
+import 'widgets/dialogs.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -56,6 +62,65 @@ class _HomeShellState extends State<HomeShell> {
   int _index = 0;
 
   @override
+  void initState() {
+    super.initState();
+    // Scarica in background le immagini che mancano (dopo un import o un reinstall).
+    unawaited(CardRepository.instance.cacheMissingImages());
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _run(Future<String> Function() job) async {
+    try {
+      _snack(await job());
+    } catch (e) {
+      _snack('Errore: $e');
+    }
+  }
+
+  Future<void> _import() async {
+    try {
+      final data = await BackupService.pickBackup();
+      if (data == null) return;
+      final nCards = (data['cards'] as List).length;
+      final nDecks = (data['decks'] is List) ? (data['decks'] as List).length : 0;
+      if (!mounted) return;
+      final ok = await confirmDialog(
+        context,
+        title: 'Importare il backup?',
+        message:
+            'Il file contiene $nCards carte e $nDecks deck.\n\nATTENZIONE: tutta la collezione e tutti i deck attuali verranno SOSTITUITI con quelli del file.',
+        confirm: 'Sostituisci tutto',
+      );
+      if (!ok) return;
+      final r = await BackupService.importData(data);
+      unawaited(CardRepository.instance.cacheMissingImages());
+      _snack('Importate ${r[0]} carte e ${r[1]} deck.');
+    } on FormatException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Importazione non riuscita: $e');
+    }
+  }
+
+  void _onMenu(String value) {
+    switch (value) {
+      case 'json':
+        _run(BackupService.exportJson);
+        break;
+      case 'csv':
+        _run(BackupService.exportCsv);
+        break;
+      case 'import':
+        _import();
+        break;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -63,17 +128,25 @@ class _HomeShellState extends State<HomeShell> {
           'MY YGO',
           style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold),
         ),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            tooltip: 'Backup',
+            onSelected: _onMenu,
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'json', child: Text('Esporta backup (JSON)')),
+              PopupMenuItem(value: 'csv', child: Text('Esporta collezione (CSV)')),
+              PopupMenuItem(value: 'import', child: Text('Importa backup')),
+            ],
+          ),
+        ],
       ),
       body: IndexedStack(
         index: _index,
         children: [
           ScanPage(active: _index == 0),
           const CollectionPage(),
-          const PlaceholderPage(
-            icon: Icons.layers_outlined,
-            title: 'Deck',
-            subtitle: 'Qui creerai i tuoi deck.',
-          ),
+          const DecksPage(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -95,35 +168,6 @@ class _HomeShellState extends State<HomeShell> {
             selectedIcon: Icon(Icons.layers),
             label: 'Deck',
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class PlaceholderPage extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-
-  const PlaceholderPage({
-    super.key,
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 72, color: AppColors.gold),
-          const SizedBox(height: 16),
-          Text(title, style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 8),
-          Text(subtitle, style: const TextStyle(color: AppColors.textDim)),
         ],
       ),
     );

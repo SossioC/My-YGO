@@ -46,7 +46,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   final TextRecognizer _recognizer =
       TextRecognizer(script: TextRecognitionScript.latin);
-  final YgoApi _api = YgoApi();
+  final YgoApi _api = YgoApi.instance;
   final Sounds _sounds = Sounds();
   final CardRepository _repo = CardRepository.instance;
   final List<_SessionItem> _session = [];

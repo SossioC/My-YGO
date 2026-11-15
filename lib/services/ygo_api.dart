@@ -16,6 +16,8 @@ class LookupResult {
 }
 
 class YgoApi {
+  static final YgoApi instance = YgoApi();
+
   static const String _base = 'https://db.ygoprodeck.com/api/v7';
 
   final http.Client _client = http.Client();
