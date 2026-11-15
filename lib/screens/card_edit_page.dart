@@ -8,6 +8,8 @@ import '../models/deck.dart';
 import '../models/owned_card.dart';
 import '../services/code_parser.dart';
 import '../services/ygo_api.dart';
+import 'art_picker_page.dart';
+import 'card_search_page.dart';
 import '../theme.dart';
 import '../widgets/card_thumb.dart';
 
@@ -108,21 +110,35 @@ class _CardEditPageState extends State<CardEditPage> {
   // ------------------------------------------------------- ricerca online
 
   /// Cerca la carta online dal codice. Imposta [_lookupProblem] se non la trova.
+  static final RegExp _passcodeRe = RegExp(r'^\d{5,10}$');
+
+  bool _looksLikeCode(String text) {
+    final t = text.trim();
+    return _passcodeRe.hasMatch(t) || CodeParser.findAll(t).isNotEmpty;
+  }
+
   Future<CardInfo?> _lookup(String text) async {
     _lookupProblem = null;
-    final codes = CodeParser.findAll(text);
-    if (codes.isEmpty) {
-      _lookupProblem =
-          'Codice non riconosciuto. Il formato è tipo LOB-IT001 o RA01-EN012.';
-      return null;
+    final t = text.trim();
+    final LookupResult res;
+    if (_passcodeRe.hasMatch(t)) {
+      // Numero a 8 cifre stampato sulla carta.
+      res = await YgoApi.instance.lookupById(int.parse(t));
+    } else {
+      final codes = CodeParser.findAll(t);
+      if (codes.isEmpty) {
+        _lookupProblem =
+            'Codice non riconosciuto. Scrivi il codice del set (es. LOB-IT001) o il numero a 8 cifre della carta, oppure usa "Cerca per nome".';
+        return null;
+      }
+      res = await YgoApi.instance.lookup(codes.first);
     }
-    final res = await YgoApi.instance.lookup(codes.first);
     if (res.networkError) {
       _lookupProblem = 'Nessuna connessione: ricerca online non riuscita.';
       return null;
     }
     if (res.card == null) {
-      _lookupProblem = 'Nessuna carta trovata con il codice ${codes.first.raw}.';
+      _lookupProblem = 'Nessuna carta trovata con il codice "$t".';
       return null;
     }
     return res.card;
@@ -155,6 +171,8 @@ class _CardEditPageState extends State<CardEditPage> {
       _ygoId = info.id;
       _imageUrl = info.imageUrl ?? info.imageSmallUrl;
       _imagePath = null;
+      // Se nel campo codice c'era il numero a 8 cifre, non è un codice di set: lo svuoto.
+      if (_passcodeRe.hasMatch(_code.text.trim())) _code.text = '';
     });
   }
 
@@ -197,6 +215,35 @@ class _CardEditPageState extends State<CardEditPage> {
         content: Text('Copie aggiunte a "${existing.displayName}".')));
     navigator.pop();
     return true;
+  }
+
+  Future<void> _changeImage() async {
+    final id = _ygoId;
+    if (id == null) return;
+    final url = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+          builder: (_) => ArtPickerPage(ygoId: id, currentUrl: _imageUrl)),
+    );
+    if (url == null || !mounted) return;
+    setState(() {
+      _imageUrl = url;
+      _imagePath = null; // verrà scaricata al salvataggio
+    });
+  }
+
+  Future<void> _searchByName() async {
+    final start = _nameIt.text.trim().isNotEmpty
+        ? _nameIt.text.trim()
+        : _nameEn.text.trim();
+    final info = await Navigator.of(context).push<CardInfo>(
+      MaterialPageRoute<CardInfo>(
+          builder: (_) => CardSearchPage(initialQuery: start)),
+    );
+    if (info == null || !mounted) return;
+    if (await _handleDuplicate(info)) return;
+    _applyInfo(info, overwrite: true);
+    setState(() => _searchedOnce = true);
+    _snack('Carta selezionata: dati compilati.');
   }
 
   Future<void> _searchOnline() async {
@@ -264,7 +311,10 @@ class _CardEditPageState extends State<CardEditPage> {
       // Se c'è un codice e la carta non è ancora collegata, prova la ricerca
       // (in questo caso compila solo i campi rimasti vuoti).
       final code = _code.text.trim();
-      if (_ygoId == null && code.isNotEmpty && !_searchedOnce) {
+      if (_ygoId == null &&
+          code.isNotEmpty &&
+          !_searchedOnce &&
+          _looksLikeCode(code)) {
         final found = await _lookup(code);
         if (!mounted) return;
         if (found != null) {
@@ -405,7 +455,7 @@ class _CardEditPageState extends State<CardEditPage> {
               controller: _code,
               textCapitalization: TextCapitalization.characters,
               decoration: const InputDecoration(
-                labelText: 'Codice (es. LOB-IT001)',
+                labelText: 'Codice del set (LOB-IT001) o numero a 8 cifre',
                 border: OutlineInputBorder(),
                 isDense: true,
               ),
@@ -469,18 +519,46 @@ class _CardEditPageState extends State<CardEditPage> {
                     height: 190),
               ),
             ),
+          if (_ygoId != null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: OutlinedButton.icon(
+                  onPressed: _changeImage,
+                  icon: const Icon(Icons.image_search, size: 18),
+                  label: const Text('Cambia illustrazione'),
+                ),
+              ),
+            ),
           _sectionTitle('CODICE'),
           _codeRow(),
+          if (_ygoId != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text('Numero della carta (a 8 cifre): $_ygoId',
+                  style: const TextStyle(color: AppColors.gold, fontSize: 12)),
+            ),
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               _ygoId != null
                   ? 'Collegata al database online. "Cerca online" sostituisce i campi con i dati trovati.'
-                  : 'Con "Cerca online" i dati trovati sostituiscono quelli che hai scritto. Se non premi il pulsante, alla pressione di Salva la ricerca parte da sola e compila solo i campi vuoti.',
+                  : 'Puoi cercare con il codice del set (in basso a destra sotto il disegno, es. LOB-IT001) oppure con il numero a 8 cifre (in basso a sinistra). I dati trovati sostituiscono quelli che hai scritto. Se non premi il pulsante, al Salva la ricerca parte da sola e compila solo i campi vuoti.',
               style: const TextStyle(color: AppColors.textDim, fontSize: 12),
             ),
           ),
           _sectionTitle('NOMI'),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: _searchByName,
+                icon: const Icon(Icons.search, size: 18),
+                label: const Text('Cerca per nome'),
+              ),
+            ),
+          ),
           _field(_nameIt, 'Nome italiano'),
           _field(_nameEn, 'Nome inglese'),
           _sectionTitle('COPIE POSSEDUTE'),

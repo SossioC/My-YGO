@@ -1,9 +1,11 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import '../models/card_filter.dart';
 import '../models/card_info.dart';
 import '../models/deck.dart';
 import '../models/owned_card.dart';
@@ -170,15 +172,96 @@ class CardRepository {
     return result;
   }
 
-  Future<List<OwnedCard>> all({String query = ''}) async {
+  /// Elenco delle carte, con ricerca, filtri e ordinamento.
+  Future<List<OwnedCard>> all({String query = '', CardFilter? filter}) async {
     final db = await _open();
-    final q = query.trim();
+    final f = filter;
+    final q = (f?.query ?? query).trim();
+    final where = <String>[];
+    final args = <Object?>[];
+
+    if (q.isNotEmpty) {
+      where.add(
+          '(name_it LIKE ? OR name_en LIKE ? OR code LIKE ? OR CAST(ygo_id AS TEXT) LIKE ?)');
+      args.addAll(['%$q%', '%$q%', '%$q%', '%$q%']);
+    }
+
+    const extraSql =
+        "(type LIKE '%Fusion%' OR type LIKE '%Synchro%' OR type LIKE '%XYZ%' OR type LIKE '%Link%')";
+
+    if (f != null) {
+      if (f.types.isNotEmpty) {
+        final parts = <String>[];
+        if (f.types.contains(TypeGroup.monster)) {
+          parts.add("(type LIKE '%Monster%' AND NOT $extraSql)");
+        }
+        if (f.types.contains(TypeGroup.spell)) parts.add("type LIKE '%Spell%'");
+        if (f.types.contains(TypeGroup.trap)) parts.add("type LIKE '%Trap%'");
+        if (f.types.contains(TypeGroup.extra)) parts.add(extraSql);
+        where.add('(${parts.join(' OR ')})');
+      }
+      if (f.attributes.isNotEmpty) {
+        where.add(
+            'UPPER(attribute) IN (${List.filled(f.attributes.length, '?').join(',')})');
+        args.addAll(f.attributes.map((a) => a.toUpperCase()));
+      }
+      if (f.levels.isNotEmpty) {
+        where.add('level IN (${List.filled(f.levels.length, '?').join(',')})');
+        args.addAll(f.levels);
+      }
+      switch (f.lang) {
+        case LangFilter.any:
+          break;
+        case LangFilter.hasIt:
+          where.add('qty_it > 0');
+          break;
+        case LangFilter.hasEn:
+          where.add('qty_en > 0');
+          break;
+        case LangFilter.onlyIt:
+          where.add('qty_it > 0 AND qty_en = 0');
+          break;
+        case LangFilter.onlyEn:
+          where.add('qty_en > 0 AND qty_it = 0');
+          break;
+      }
+      if (f.duplicatesOnly) where.add('(qty_it + qty_en) > 1');
+      if (f.deck == DeckFilter.inDeck) {
+        where.add(
+            'EXISTS (SELECT 1 FROM deck_cards dc WHERE dc.card_id = cards.id)');
+      } else if (f.deck == DeckFilter.notInDeck) {
+        where.add(
+            'NOT EXISTS (SELECT 1 FROM deck_cards dc WHERE dc.card_id = cards.id)');
+      }
+    }
+
+    const nameExpr =
+        "LOWER(CASE WHEN name_it != '' THEN name_it ELSE name_en END)";
+    final dir = (f?.ascending ?? true) ? 'ASC' : 'DESC';
+    String order;
+    switch (f?.sort ?? SortKey.name) {
+      case SortKey.name:
+        order = '$nameExpr $dir';
+        break;
+      case SortKey.qty:
+        order = '(qty_it + qty_en) $dir, $nameExpr';
+        break;
+      case SortKey.added:
+        order = 'created_at $dir, $nameExpr';
+        break;
+      case SortKey.level:
+        order = 'COALESCE(level, -1) $dir, $nameExpr';
+        break;
+      case SortKey.atk:
+        order = 'COALESCE(atk, -1) $dir, $nameExpr';
+        break;
+    }
+
     final rows = await db.query(
       'cards',
-      where: q.isEmpty ? null : 'name_it LIKE ? OR name_en LIKE ? OR code LIKE ?',
-      whereArgs: q.isEmpty ? null : ['%$q%', '%$q%', '%$q%'],
-      orderBy:
-          "LOWER(CASE WHEN name_it != '' THEN name_it ELSE name_en END)",
+      where: where.isEmpty ? null : where.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: order,
     );
     return rows.map(OwnedCard.fromMap).toList();
   }
@@ -611,6 +694,138 @@ class CardRepository {
     });
     _changed();
     return [nCards, nDecks];
+  }
+
+  /// Aggiunge il contenuto di un backup a quello attuale.
+  /// Restituisce [carte nuove, carte già presenti aggiornate, deck aggiunti].
+  Future<List<int>> mergeData(Map<String, dynamic> data,
+      {required bool useMax}) async {
+    final cards = data['cards'];
+    if (cards is! List) throw const FormatException('Il file non contiene carte.');
+    final decks = (data['decks'] is List) ? data['decks'] as List : <dynamic>[];
+    final db = await _open();
+    var added = 0;
+    var updated = 0;
+    var decksAdded = 0;
+
+    await db.transaction((txn) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final idMap = <int, int>{}; // id nel file -> id nel database
+      final touched = <int>{};
+
+      for (final c in cards) {
+        if (c is! Map) continue;
+        final incoming = OwnedCard.fromMap(Map<String, Object?>.from(c));
+        final oldId = incoming.id;
+        if (oldId == null) continue;
+        incoming.imagePath = null;
+
+        List<Map<String, Object?>> found;
+        if (incoming.ygoId != null) {
+          found = await txn.query('cards',
+              where: 'ygo_id = ?', whereArgs: [incoming.ygoId], limit: 1);
+        } else {
+          found = await txn.query('cards',
+              where:
+                  'ygo_id IS NULL AND LOWER(name_en) = ? AND LOWER(name_it) = ? AND UPPER(code) = ?',
+              whereArgs: [
+                incoming.nameEn.toLowerCase(),
+                incoming.nameIt.toLowerCase(),
+                incoming.code.toUpperCase(),
+              ],
+              limit: 1);
+        }
+
+        if (found.isNotEmpty) {
+          final ex = OwnedCard.fromMap(found.first);
+          if (useMax) {
+            ex.qtyIt = math.max(ex.qtyIt, incoming.qtyIt);
+            ex.qtyEn = math.max(ex.qtyEn, incoming.qtyEn);
+          } else {
+            ex.qtyIt += incoming.qtyIt;
+            ex.qtyEn += incoming.qtyEn;
+          }
+          if (ex.nameIt.isEmpty) ex.nameIt = incoming.nameIt;
+          if (ex.nameEn.isEmpty) ex.nameEn = incoming.nameEn;
+          if (ex.descIt.isEmpty) ex.descIt = incoming.descIt;
+          if (ex.descEn.isEmpty) ex.descEn = incoming.descEn;
+          if (ex.type.isEmpty) ex.type = incoming.type;
+          if (ex.attribute.isEmpty) ex.attribute = incoming.attribute;
+          if (ex.race.isEmpty) ex.race = incoming.race;
+          if (ex.code.isEmpty) ex.code = incoming.code;
+          ex.level ??= incoming.level;
+          ex.atk ??= incoming.atk;
+          ex.def ??= incoming.def;
+          ex.imageUrl ??= incoming.imageUrl;
+          ex.updatedAt = now;
+          await txn.update('cards', ex.toMap(),
+              where: 'id = ?', whereArgs: [ex.id]);
+          idMap[oldId] = ex.id!;
+          touched.add(ex.id!);
+          updated++;
+        } else {
+          incoming.id = null;
+          final newId = await txn.insert('cards', incoming.toMap());
+          idMap[oldId] = newId;
+          added++;
+        }
+      }
+
+      final names = (await txn.query('decks', columns: ['name']))
+          .map((r) => (r['name'] as String).toLowerCase())
+          .toSet();
+      for (final d in decks) {
+        if (d is! Map) continue;
+        final name = d['name'];
+        if (name is! String) continue;
+        var finalName = name;
+        var n = 2;
+        while (names.contains(finalName.toLowerCase())) {
+          finalName = '$name ($n)';
+          n++;
+        }
+        names.add(finalName.toLowerCase());
+        final deckId = await txn.insert('decks',
+            {'name': finalName, 'created_at': now, 'updated_at': now});
+        decksAdded++;
+        final list = d['cards'];
+        if (list is! List) continue;
+        for (final r in list) {
+          if (r is! Map) continue;
+          final cardId = r['card'] is int ? idMap[r['card'] as int] : null;
+          final section = r['section'];
+          final qty = r['qty'];
+          if (cardId == null) continue;
+          if (section != kMain && section != kExtra && section != kSide) continue;
+          if (qty is! int || qty <= 0) continue;
+          final ex = await txn.query('deck_cards',
+              where: 'deck_id = ? AND card_id = ? AND section = ?',
+              whereArgs: [deckId, cardId, section]);
+          if (ex.isEmpty) {
+            await txn.insert('deck_cards', {
+              'deck_id': deckId,
+              'card_id': cardId,
+              'section': section,
+              'qty': qty,
+            });
+          } else {
+            await txn.update('deck_cards', {'qty': (ex.first['qty'] as int) + qty},
+                where: 'deck_id = ? AND card_id = ? AND section = ?',
+                whereArgs: [deckId, cardId, section]);
+          }
+          touched.add(cardId);
+        }
+      }
+
+      for (final id in touched) {
+        final total = Sqflite.firstIntValue(await txn.rawQuery(
+                'SELECT qty_it + qty_en FROM cards WHERE id = ?', [id])) ??
+            0;
+        await _clampDecks(txn, id, total);
+      }
+    });
+    _changed();
+    return [added, updated, decksAdded];
   }
 
   /// Scarica le immagini mancanti (dopo un import o un reinstall).

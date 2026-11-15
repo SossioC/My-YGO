@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'data/card_repository.dart';
+import 'models/import_mode.dart';
 import 'screens/collection_page.dart';
 import 'screens/decks_page.dart';
 import 'screens/scan_page.dart';
@@ -88,22 +89,79 @@ class _HomeShellState extends State<HomeShell> {
       final nCards = (data['cards'] as List).length;
       final nDecks = (data['decks'] is List) ? (data['decks'] as List).length : 0;
       if (!mounted) return;
-      final ok = await confirmDialog(
-        context,
-        title: 'Importare il backup?',
-        message:
-            'Il file contiene $nCards carte e $nDecks deck.\n\nATTENZIONE: tutta la collezione e tutti i deck attuali verranno SOSTITUITI con quelli del file.',
-        confirm: 'Sostituisci tutto',
-      );
-      if (!ok) return;
-      final r = await BackupService.importData(data);
+      final mode = await _askImportMode(nCards, nDecks);
+      if (mode == null) return;
+      if (mode == ImportMode.replace) {
+        if (!mounted) return;
+        final sure = await confirmDialog(
+          context,
+          title: 'Sostituire tutto?',
+          message:
+              'Tutta la collezione e tutti i deck attuali verranno CANCELLATI e sostituiti con quelli del file. Non si può annullare.',
+          confirm: 'Sostituisci tutto',
+        );
+        if (!sure) return;
+      }
+      final msg = await BackupService.importData(data, mode);
       unawaited(CardRepository.instance.cacheMissingImages());
-      _snack('Importate ${r[0]} carte e ${r[1]} deck.');
+      _snack(msg);
     } on FormatException catch (e) {
       _snack(e.message);
     } catch (e) {
       _snack('Importazione non riuscita: $e');
     }
+  }
+
+  Future<ImportMode?> _askImportMode(int nCards, int nDecks) {
+    Widget option(ImportMode mode, String title, String sub, {Color? color}) {
+      return SimpleDialogOption(
+        onPressed: () => Navigator.of(context).pop(mode),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title,
+                style: TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.bold, color: color)),
+            const SizedBox(height: 2),
+            Text(sub,
+                style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
+          ],
+        ),
+      );
+    }
+
+    return showDialog<ImportMode>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Importare il backup?'),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text('Il file contiene $nCards carte e $nDecks deck.'),
+          ),
+          option(
+            ImportMode.mergeSum,
+            'Unisci e somma le copie',
+            'Le carte già presenti ricevono le copie del file. Importare due volte lo stesso file raddoppia le copie.',
+          ),
+          option(
+            ImportMode.mergeMax,
+            'Unisci e tieni il valore maggiore',
+            'Per ogni carta e lingua resta il numero di copie più alto tra il tuo e quello del file. Importare di nuovo lo stesso file non cambia nulla.',
+          ),
+          option(
+            ImportMode.replace,
+            'Sostituisci tutto',
+            'Cancella la collezione e i deck attuali e usa solo il file.',
+            color: AppColors.danger,
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Annulla'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _onMenu(String value) {

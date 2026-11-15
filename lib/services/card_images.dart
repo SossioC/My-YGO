@@ -10,13 +10,22 @@ import 'debug_log.dart';
 class CardImages {
   static final http.Client _client = http.Client();
 
+  /// Il nome del file viene dall'indirizzo (es. 6983839.jpg): illustrazioni
+  /// diverse della stessa carta hanno così file diversi.
+  static String _fileName(String url, int ygoId) {
+    final segment = Uri.tryParse(url)?.pathSegments.lastOrNull ?? '';
+    final clean = segment.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '');
+    if (clean.isEmpty || !clean.contains('.')) return '$ygoId.jpg';
+    return clean;
+  }
+
   static Future<String?> download(int ygoId, String? url) async {
     if (url == null || url.isEmpty) return null;
     try {
       final dir = await getApplicationDocumentsDirectory();
       final folder = Directory(p.join(dir.path, 'card_images'));
       if (!await folder.exists()) await folder.create(recursive: true);
-      final file = File(p.join(folder.path, '$ygoId.jpg'));
+      final file = File(p.join(folder.path, _fileName(url, ygoId)));
       if (await file.exists() && await file.length() > 0) return file.path;
       final res =
           await _client.get(Uri.parse(url)).timeout(const Duration(seconds: 20));

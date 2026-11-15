@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../data/card_repository.dart';
+import '../models/card_filter.dart';
 import '../models/deck.dart';
 import '../models/owned_card.dart';
 import '../theme.dart';
 import '../widgets/card_thumb.dart';
+import '../widgets/filter_sheet.dart';
+import 'card_edit_page.dart';
 
 /// Scelta delle carte della collezione da mettere in un deck.
 class DeckCardPickerPage extends StatefulWidget {
@@ -19,6 +22,7 @@ class DeckCardPickerPage extends StatefulWidget {
 class _DeckCardPickerPageState extends State<DeckCardPickerPage> {
   final _repo = CardRepository.instance;
   final _search = TextEditingController();
+  CardFilter _filter = CardFilter();
 
   List<OwnedCard> _cards = [];
   // cardId -> sezione -> copie
@@ -41,7 +45,8 @@ class _DeckCardPickerPageState extends State<DeckCardPickerPage> {
   }
 
   Future<void> _reload() async {
-    final cards = await _repo.all(query: _search.text);
+    _filter.query = _search.text;
+    final cards = await _repo.all(filter: _filter);
     final entries = await _repo.deckCards(widget.deckId);
     final map = <int, Map<String, int>>{};
     for (final e in entries) {
@@ -78,7 +83,33 @@ class _DeckCardPickerPageState extends State<DeckCardPickerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Aggiungi carte')),
+      appBar: AppBar(
+        title: const Text('Aggiungi carte'),
+        actions: [
+          IconButton(
+            tooltip: 'Filtri e ordinamento',
+            icon: Badge(
+              isLabelVisible: _filter.activeCount > 0 || !_filter.isDefaultSort,
+              label: _filter.activeCount > 0 ? Text('${_filter.activeCount}') : null,
+              child: const Icon(Icons.tune),
+            ),
+            onPressed: () async {
+              final r = await showFilterSheet(context, _filter,
+                  showDeckFilter: false);
+              if (r == null) return;
+              _filter = r;
+              await _reload();
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_card),
+            tooltip: 'Nuova carta nella collezione',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const CardEditPage()),
+            ),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -87,7 +118,7 @@ class _DeckCardPickerPageState extends State<DeckCardPickerPage> {
               controller: _search,
               onChanged: (_) => _reload(),
               decoration: const InputDecoration(
-                hintText: 'Cerca per nome o codice',
+                hintText: 'Cerca per nome, codice o numero',
                 prefixIcon: Icon(Icons.search),
                 border: OutlineInputBorder(),
                 isDense: true,
@@ -133,8 +164,14 @@ class _DeckCardPickerPageState extends State<DeckCardPickerPage> {
     if (!_loaded) return const Center(child: CircularProgressIndicator());
     if (_cards.isEmpty) {
       return const Center(
-        child: Text('Nessuna carta trovata nella collezione.',
-            style: TextStyle(color: AppColors.textDim)),
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Nessuna carta trovata nella collezione.\nSe la carta non è ancora nella collezione, aggiungila con il pulsante in alto a destra (cercandola per nome o per numero).',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: AppColors.textDim),
+          ),
+        ),
       );
     }
     return ListView.builder(

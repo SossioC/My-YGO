@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 
 import '../data/card_repository.dart';
+import '../models/import_mode.dart';
 
 class BackupService {
   static final CardRepository _repo = CardRepository.instance;
@@ -101,6 +102,17 @@ class BackupService {
     return decoded;
   }
 
-  static Future<List<int>> importData(Map<String, dynamic> data) =>
-      _repo.importData(data);
+  /// Importa il backup nel modo scelto e restituisce un messaggio con il risultato.
+  static Future<String> importData(
+      Map<String, dynamic> data, ImportMode mode) async {
+    switch (mode) {
+      case ImportMode.replace:
+        final r = await _repo.importData(data);
+        return 'Importate ${r[0]} carte e ${r[1]} deck (collezione sostituita).';
+      case ImportMode.mergeSum:
+      case ImportMode.mergeMax:
+        final r = await _repo.mergeData(data, useMax: mode == ImportMode.mergeMax);
+        return 'Unione completata: ${r[0]} carte nuove, ${r[1]} già presenti aggiornate, ${r[2]} deck aggiunti.';
+    }
+  }
 }

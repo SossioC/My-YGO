@@ -33,6 +33,11 @@ jobs:
           fi
           sed -i 's/android:label="[^"]*"/android:label="My YGO"/' android/app/src/main/AndroidManifest.xml
 
+      - name: Applica l'icona dell'app
+        run: |
+          find android/app/src/main/res -name 'ic_launcher*' -delete
+          cp -r android_res/. android/app/src/main/res/
+
       - name: Regole per R8 (ignora i riconoscitori di altre scritture di ML Kit)
         run: |
           cat > android/app/proguard-rules.pro <<'EOF2'

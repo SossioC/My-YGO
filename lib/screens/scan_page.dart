@@ -767,13 +767,14 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                 const SizedBox(height: 2),
                 Text(
                   (card.nameIt == null || card.nameIt!.isEmpty)
-                      ? '(nome italiano mancante)'
+                      ? card.nameEn
                       : card.nameIt!,
                   style: const TextStyle(
                       fontWeight: FontWeight.bold, fontSize: 15),
                 ),
-                Text(card.nameEn,
-                    style: const TextStyle(color: AppColors.textDim)),
+                if (card.nameIt != null && card.nameIt!.isNotEmpty)
+                  Text(card.nameEn,
+                      style: const TextStyle(color: AppColors.textDim)),
                 Text('${_bannerCode ?? ''}  ·  $_bannerTotals',
                     style: const TextStyle(color: AppColors.gold, fontSize: 12)),
               ],
@@ -870,9 +871,10 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
           dense: true,
           leading: CardThumb(
               path: c.imagePath, url: c.imageUrl, width: 30, height: 44),
-          title: Text(c.nameIt.isEmpty ? '—' : c.nameIt,
+          title: Text(c.displayName,
               maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text('${c.nameEn}  ·  ${c.code}',
+          subtitle: Text(
+              c.nameIt.isEmpty ? c.code : '${c.nameEn}  ·  ${c.code}',
               maxLines: 1, overflow: TextOverflow.ellipsis),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
